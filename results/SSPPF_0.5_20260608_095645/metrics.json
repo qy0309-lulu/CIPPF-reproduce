@@ -1,0 +1,102 @@
+{
+  "run_params": {
+    "method": "CIPPF",
+    "experiment_time": "20260608_095645",
+    "bins_before": 4,
+    "bins_current": 1,
+    "bins_after": 5,
+    "removed_neuron_threshold": 100,
+    "num_examples_after_nan_removal": 27854,
+    "num_neurons_after_filtering": 46,
+    "model_params": {
+      "encoding_model": "linear",
+      "glm_l2": 0.0001,
+      "process_noise_scale": 1.0,
+      "connectivity_cov_scale": 1.0,
+      "marginal_cov_scale": 1.0,
+      "initial_cov_scale": 1.0,
+      "half_gaussian_sigma": 5.0,
+      "half_gaussian_width": 30,
+      "ann_hidden_layers": [
+        64,
+        32
+      ],
+      "ann_alpha": 0.0001,
+      "ann_max_iter": 500,
+      "max_newton_iter": 8,
+      "random_state": 0,
+      "verbose": 1
+    }
+  },
+  "split_metrics": [
+    {
+      "train_fraction": 0.5,
+      "metrics": {
+        "R2_test": [
+          -0.42739071551755314,
+          0.21257486277029725
+        ],
+        "rho_test": [
+          0.4051642482798127,
+          0.6478243784661676
+        ],
+        "MSE_test": [
+          3953.891428930884,
+          1812.062709924648
+        ],
+        "NRMSE_range_test": [
+          0.3262734096836944,
+          0.22251400132081037
+        ],
+        "NMSE_variance_test": [
+          1.4273907155175451,
+          0.787425137229708
+        ]
+      },
+      "experiment_params": {
+        "method": "CIPPF",
+        "experiment_time": "20260608_095645",
+        "bins_before": 4,
+        "bins_current": 1,
+        "bins_after": 5,
+        "removed_neuron_threshold": 100,
+        "num_examples_after_nan_removal": 27854,
+        "num_neurons_after_filtering": 46,
+        "train_fraction": 0.5,
+        "training_range": [
+          0,
+          0.5
+        ],
+        "testing_range": [
+          0.5,
+          1.0
+        ],
+        "num_train_samples": 13918,
+        "num_test_samples": 13918,
+        "y_train_mean": [
+          168.55115779940706,
+          95.9848468649799
+        ],
+        "model_params": {
+          "encoding_model": "linear",
+          "glm_l2": 0.0001,
+          "process_noise_scale": 1.0,
+          "connectivity_cov_scale": 1.0,
+          "marginal_cov_scale": 1.0,
+          "initial_cov_scale": 1.0,
+          "half_gaussian_sigma": 5.0,
+          "half_gaussian_width": 30,
+          "ann_hidden_layers": [
+            64,
+            32
+          ],
+          "ann_alpha": 0.0001,
+          "ann_max_iter": 500,
+          "max_newton_iter": 8,
+          "random_state": 0,
+          "verbose": 1
+        }
+      }
+    }
+  ]
+}

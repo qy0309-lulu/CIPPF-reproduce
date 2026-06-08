@@ -1,6 +1,6 @@
 # Neural correlation integrated adaptive point-process filter (CIPPF).
 #
-# This script follows the hippocampal decoding workflow used by the SSPPF
+# This script follows the hippocampal decoding workflow used by the SSPPF_OneOrder
 # examples, but adds the CIPPF functional-connectivity term proposed by
 # Li et al. (2025). The posterior combines:
 #   1. linear Gaussian state prediction,
@@ -9,6 +9,9 @@
 #      lambda_minus is a smoothed population spike pattern and g is an ANN.
 
 from pathlib import Path
+import csv
+from datetime import datetime
+import json
 import pickle
 import sys
 
@@ -22,8 +25,10 @@ from sklearn.preprocessing import StandardScaler
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "Neural_Decoding"))
 
-from metrics import get_R2, get_rho
-from preprocessing_funcs import get_spikes_with_history
+
+
+from utils.metrics import get_R2, get_rho
+from utils.preprocessing_funcs import get_spikes_with_history
 
 
 def get_mse_by_axis(y_true, y_pred):
@@ -43,6 +48,94 @@ def get_nmse_by_variance(y_true, y_pred):
     variance = np.var(y_true, axis=0)
     variance[variance == 0] = np.nan
     return mse / variance
+
+
+def _json_ready(value):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, dict):
+        return {key: _json_ready(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_json_ready(item) for item in value]
+    return value
+
+
+def save_experiment_results(
+    output_dir,
+    run_params,
+    split_results,
+):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    with (output_dir / "metrics.json").open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "run_params": _json_ready(run_params),
+                "split_metrics": _json_ready(
+                    [
+                        {
+                            "train_fraction": result["train_fraction"],
+                            "metrics": result["metrics"],
+                            "experiment_params": result["experiment_params"],
+                        }
+                        for result in split_results
+                    ]
+                ),
+            },
+            f,
+            indent=2,
+        )
+
+    with (output_dir / "predictions.csv").open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "test_row",
+                "source_time_index",
+                "true_x",
+                "true_y",
+                "pred_x",
+                "pred_y",
+                "error_x",
+                "error_y",
+            ]
+        )
+        for result in split_results:
+            for row_idx, source_idx in enumerate(result["testing_set"]):
+                writer.writerow(
+                    [
+                        row_idx,
+                        int(source_idx),
+                        result["y_true_original"][row_idx, 0],
+                        result["y_true_original"][row_idx, 1],
+                        result["y_pred_original"][row_idx, 0],
+                        result["y_pred_original"][row_idx, 1],
+                        result["errors_original"][row_idx, 0],
+                        result["errors_original"][row_idx, 1],
+                    ]
+                )
+
+    npz_data = {}
+    for result in split_results:
+        split_name = "train_{:.1f}".format(result["train_fraction"]).replace(".", "_")
+        npz_data[f"{split_name}_y_true_centered"] = result["y_true_centered"]
+        npz_data[f"{split_name}_y_pred_centered"] = result["y_pred_centered"]
+        npz_data[f"{split_name}_y_true_original"] = result["y_true_original"]
+        npz_data[f"{split_name}_y_pred_original"] = result["y_pred_original"]
+        npz_data[f"{split_name}_errors_original"] = result["errors_original"]
+        npz_data[f"{split_name}_y_train_mean"] = result["y_train_mean"]
+        npz_data[f"{split_name}_training_set"] = result["training_set"]
+        npz_data[f"{split_name}_testing_set"] = result["testing_set"]
+        for key, value in result["metrics"].items():
+            npz_data[f"{split_name}_metric_{key}"] = value
+
+    np.savez_compressed(output_dir / "results.npz", **npz_data)
+    return output_dir
 
 
 class NeuralCorrelationIntegratedPointProcessFilter:
@@ -350,6 +443,7 @@ def main():
     bins_before = 4
     bins_current = 1
     bins_after = 5
+    experiment_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     nd_sum = np.nansum(neural_data, axis=0)
     rmv_nrn = np.where(nd_sum < 100)
@@ -365,81 +459,147 @@ def main():
     spike_counts = np.delete(neural_data, rmv_time, 0)
     y = np.delete(y, rmv_time, 0)
 
-    training_range = [0, 0.5]
-    testing_range = [0.5, 1.0]
+    base_experiment_params = {
+        "method": "CIPPF",
+        "experiment_time": experiment_time,
+        "bins_before": bins_before,
+        "bins_current": bins_current,
+        "bins_after": bins_after,
+        "removed_neuron_threshold": 100,
+        "num_examples_after_nan_removal": int(X.shape[0]),
+        "num_neurons_after_filtering": int(spike_counts.shape[1]),
+        # "num_position_dims": int(y.shape[1]),
+    }
 
-    num_examples = X.shape[0]
-    training_set = np.arange(
-        int(np.round(training_range[0] * num_examples)) + bins_before,
-        int(np.round(training_range[1] * num_examples)) - bins_after,
-    )
-    testing_set = np.arange(
-        int(np.round(testing_range[0] * num_examples)) + bins_before,
-        int(np.round(testing_range[1] * num_examples)) - bins_after,
-    )
-    y_train = y[training_set, :]
-    y_test = y[testing_set, :]
+    model_params = {
+        "encoding_model": "linear",
+        "glm_l2": 1e-4,
+        "process_noise_scale": 1.0,
+        "connectivity_cov_scale": 1.0,
+        "marginal_cov_scale": 1.0,
+        "initial_cov_scale": 1.0,
+        "half_gaussian_sigma": 5.0,
+        "half_gaussian_width": 30,
+        "ann_hidden_layers": (64, 32),
+        "ann_alpha": 1e-4,
+        "ann_max_iter": 500,
+        "max_newton_iter": 8,
+        "random_state": 0,
+        "verbose": verbose,
+    } # 检查----
 
-    spike_counts_train = spike_counts[training_set, :]
-    spike_counts_test = spike_counts[testing_set, :]
 
-    y_train_mean = np.mean(y_train, axis=0)
-    y_train = y_train - y_train_mean
-    y_test = y_test - y_train_mean
+    for p in [0.4, 0.5, 0.6, 0.8]:
+        training_range = [0, p]
+        testing_range = [p, 1.0]
 
-    print("Starting CIPPF training")
-    model = NeuralCorrelationIntegratedPointProcessFilter(
-        encoding_model="linear",
-        glm_l2=1e-4,
-        process_noise_scale=1.0,
-        connectivity_cov_scale=1.0,
-        marginal_cov_scale=1.0,
-        initial_cov_scale=1.0,
-        half_gaussian_sigma=5.0,
-        half_gaussian_width=30,
-        ann_hidden_layers=(64, 32),
-        ann_alpha=1e-4,
-        ann_max_iter=500,
-        max_newton_iter=8,
-        random_state=0,
-        verbose=verbose,
-    )
-    model.fit(spike_counts_train, y_train)
+        split_results = []
+        dir_name = f"CIPPF_{p}_" + experiment_time
+        output_dir = SCRIPT_DIR / "results" / dir_name
 
-    print("Decoding test set with CIPPF")
-    predictions = model.predict(spike_counts_test, y_test[0])
-    R2_test = get_R2(y_test, predictions)
-    rho_test = get_rho(y_test, predictions)
-    mse_test = get_mse_by_axis(y_test, predictions)
-    nrmse_test = get_nrmse_by_range(y_test, predictions)
-    nmse_test = get_nmse_by_variance(y_test, predictions)
-    print("\n[CIPPF] test R2:", R2_test)
-    print("[CIPPF] test rho:", rho_test)
-    print("[CIPPF] test MSE [X, Y]:", mse_test)
-    print("[CIPPF] test NRMSE_range [X, Y]:", nrmse_test)
-    print("[CIPPF] test NMSE_var [X, Y]:", nmse_test)
+        num_examples = X.shape[0]
+        training_set = np.arange(
+            int(np.round(training_range[0] * num_examples)) + bins_before,
+            int(np.round(training_range[1] * num_examples)) - bins_after,
+        )
+        testing_set = np.arange(
+            int(np.round(testing_range[0] * num_examples)) + bins_before,
+            int(np.round(testing_range[1] * num_examples)) - bins_after,
+        )
+        y_train = y[training_set, :]
+        y_test = y[testing_set, :]
 
-    plot_start = min(2000, max(0, y_test.shape[0] - 1))
-    plot_end = min(3000, y_test.shape[0])
-    if plot_end <= plot_start:
-        plot_start = 0
-        plot_end = y_test.shape[0]
+        spike_counts_train = spike_counts[training_set, :]
+        spike_counts_test = spike_counts[testing_set, :]
 
-    fig_x_cippf = plt.figure()
-    plt.plot(y_test[plot_start:plot_end, 0] + y_train_mean[0], "b", label="ground_truth")
-    plt.plot(predictions[plot_start:plot_end, 0] + y_train_mean[0], "r", label="prediction")
-    plt.xlabel("Time bin")
-    plt.ylabel("X position")
-    plt.legend()
-    fig_x_cippf.savefig("x_position_decoding_cippf_1V1.jpg", dpi=300)
+        y_train_mean = np.mean(y_train, axis=0)
+        y_train = y_train - y_train_mean
+        y_test = y_test - y_train_mean
 
-    fig_y_cippf = plt.figure()
-    plt.plot(y_test[plot_start:plot_end, 1] + y_train_mean[1], "b", label="ground_truth")
-    plt.plot(predictions[plot_start:plot_end, 1] + y_train_mean[1], "r", label="prediction")
-    plt.xlabel("Time bin")
-    plt.ylabel("Y position")
-    plt.legend()
-    fig_y_cippf.savefig("y_position_decoding_cippf_1V1.jpg", dpi=300)
+        print("Starting CIPPF training")
+        model = NeuralCorrelationIntegratedPointProcessFilter(**model_params)
+        model.fit(spike_counts_train, y_train)
+
+        print("Decoding test set with CIPPF")
+        predictions = model.predict(spike_counts_test, y_test[0])
+        R2_test = get_R2(y_test, predictions)
+        rho_test = get_rho(y_test, predictions)
+        mse_test = get_mse_by_axis(y_test, predictions)
+        nrmse_test = get_nrmse_by_range(y_test, predictions)
+        nmse_test = get_nmse_by_variance(y_test, predictions)
+        print("\n[CIPPF] test R2:", R2_test)
+        print("[CIPPF] test rho:", rho_test)
+        print("[CIPPF] test MSE [X, Y]:", mse_test)
+        print("[CIPPF] test NRMSE_range [X, Y]:", nrmse_test)
+        print("[CIPPF] test NMSE_var [X, Y]:", nmse_test)
+
+        metrics = {
+            "R2_test": R2_test,
+            "rho_test": rho_test,
+            "MSE_test": mse_test,
+            "NRMSE_range_test": nrmse_test,
+            "NMSE_variance_test": nmse_test,
+        }
+        experiment_params = {
+            **base_experiment_params,
+            "train_fraction": p,
+            "training_range": training_range,
+            "testing_range": testing_range,
+            "num_train_samples": int(y_train.shape[0]),
+            "num_test_samples": int(y_test.shape[0]),
+            "y_train_mean": y_train_mean,
+            "model_params": model_params,
+        }
+
+        y_true_original = y_test + y_train_mean
+        y_pred_original = predictions + y_train_mean
+        split_results.append(
+            {
+                "train_fraction": p,
+                "metrics": metrics,
+                "experiment_params": experiment_params,
+                "y_true_centered": y_test,
+                "y_pred_centered": predictions,
+                "y_true_original": y_true_original,
+                "y_pred_original": y_pred_original,
+                "errors_original": y_pred_original - y_true_original,
+                "y_train_mean": y_train_mean,
+                "training_set": training_set,
+                "testing_set": testing_set,
+            }
+        )
+
+        # plot_start = min(2000, max(0, y_test.shape[0] - 1))
+        # plot_end = min(3000, y_test.shape[0])
+        # if plot_end <= plot_start:
+        #     plot_start = 0
+        #     plot_end = y_test.shape[0]
+        #
+        # fig_x_cippf = plt.figure()
+        # plt.plot(y_test[plot_start:plot_end, 0] + y_train_mean[0], "b", label="ground_truth")
+        # plt.plot(predictions[plot_start:plot_end, 0] + y_train_mean[0], "r", label="prediction")
+        # plt.xlabel("Time bin")
+        # plt.ylabel("X position")
+        # plt.legend()
+        # fig_x_cippf.savefig(f"x_position_decoding_cippf_{p}.jpg", dpi=300)
+        #
+        # fig_y_cippf = plt.figure()
+        # plt.plot(y_test[plot_start:plot_end, 1] + y_train_mean[1], "b", label="ground_truth")
+        # plt.plot(predictions[plot_start:plot_end, 1] + y_train_mean[1], "r", label="prediction")
+        # plt.xlabel("Time bin")
+        # plt.ylabel("Y position")
+        # plt.legend()
+        # fig_y_cippf.savefig(f"y_position_decoding_cippf_{p}.jpg", dpi=300)
+
+        saved_dir = save_experiment_results(
+            output_dir,
+            {
+                **base_experiment_params,
+                "model_params": model_params,
+            },
+            split_results,
+        )
+        print("[CIPPF] saved results to:", saved_dir)
 
 
 if __name__ == "__main__":
